@@ -6,10 +6,19 @@ Safe to run multiple times (idempotent via get_or_create).
 """
 
 import uuid
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from rest_framework.authtoken.models import Token
 from apps.merchants.models import Merchant, BankAccount
 from apps.ledger.models import LedgerEntry, LedgerEntryType
+
+User = get_user_model()
+
+# Default password for seeded merchants. Override via env if you must, but
+# this command is dev/seed-only and the README explicitly says "rotate before
+# any non-local deployment".
+SEED_PASSWORD = "playto-dev-password"
 
 
 SEED_MERCHANTS = [
@@ -17,6 +26,7 @@ SEED_MERCHANTS = [
         "id": "11111111-1111-1111-1111-111111111111",
         "name": "Acme Retail Pvt Ltd",
         "email": "acme@example.com",
+        "username": "acme",
         "bank_accounts": [
             {
                 "id": "aaaa1111-0000-0000-0000-000000000001",
@@ -36,6 +46,7 @@ SEED_MERCHANTS = [
         "id": "22222222-2222-2222-2222-222222222222",
         "name": "Bharat Electronics",
         "email": "bharat@example.com",
+        "username": "bharat",
         "bank_accounts": [
             {
                 "id": "bbbb2222-0000-0000-0000-000000000001",
@@ -54,6 +65,7 @@ SEED_MERCHANTS = [
         "id": "33333333-3333-3333-3333-333333333333",
         "name": "Chennai Crafts",
         "email": "chennai@example.com",
+        "username": "chennai",
         "bank_accounts": [
             {
                 "id": "cccc3333-0000-0000-0000-000000000001",
@@ -77,14 +89,40 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **options):
         for m_data in SEED_MERCHANTS:
+            # ── Auth user (one User per Merchant) ────────────────────────────
+            user, user_created = User.objects.get_or_create(
+                username=m_data["username"],
+                defaults={"email": m_data["email"]},
+            )
+            if user_created:
+                user.set_password(SEED_PASSWORD)
+                user.save()
+                self.stdout.write(f"  Created user: {user.username} (password: {SEED_PASSWORD})")
+
+            # Issue a token so the frontend / curl can hit the API immediately
+            token, _ = Token.objects.get_or_create(user=user)
+
+            # ── Merchant linked to the user ──────────────────────────────────
             merchant, created = Merchant.objects.get_or_create(
                 id=m_data["id"],
-                defaults={"name": m_data["name"], "email": m_data["email"]},
+                defaults={
+                    "name": m_data["name"],
+                    "email": m_data["email"],
+                    "auth_user": user,
+                },
             )
             if created:
-                self.stdout.write(f"  Created merchant: {merchant.name}")
+                self.stdout.write(
+                    f"  Created merchant: {merchant.name}  token={token.key}"
+                )
             else:
-                self.stdout.write(f"  Merchant already exists: {merchant.name}")
+                # Backfill auth_user on a previously seeded merchant
+                if merchant.auth_user_id is None:
+                    merchant.auth_user = user
+                    merchant.save(update_fields=["auth_user"])
+                self.stdout.write(
+                    f"  Merchant already exists: {merchant.name}  token={token.key}"
+                )
 
             for ba_data in m_data["bank_accounts"]:
                 BankAccount.objects.get_or_create(

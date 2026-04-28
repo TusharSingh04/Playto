@@ -3,10 +3,12 @@ import logging
 
 from django.shortcuts import get_object_or_404
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from apps.merchants.models import Merchant
+from apps.merchants.permissions import require_owned_merchant
 from apps.payouts.models import Payout
 from apps.payouts.serializers import CreatePayoutSerializer, PayoutSerializer
 from apps.payouts.service import create_payout
@@ -15,17 +17,34 @@ from apps.payouts.tasks import process_payout
 logger = logging.getLogger(__name__)
 
 
+def _resolve_merchant(request):
+    """Always derive merchant from the authenticated user. Never trust the body."""
+    merchant = getattr(request.user, "merchant", None)
+    if merchant is None:
+        raise PermissionDenied("This user is not linked to a merchant account.")
+    return merchant
+
+
 class PayoutCreateView(APIView):
     """
     POST /api/v1/payouts
 
     Required header: Idempotency-Key (UUID)
+    Auth: Token (Authorization: Token <key>)
+
+    The merchant is resolved from request.user — clients cannot spoof
+    merchant_id by sending it in the body.
 
     Creates a payout atomically with a ledger hold.
     Enqueues async Celery task for processing.
     """
 
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payout_create"
+
     def post(self, request):
+        merchant = _resolve_merchant(request)
+
         # ── Validate idempotency key ──────────────────────────────────────────
         raw_key = request.headers.get("Idempotency-Key", "").strip()
         if not raw_key:
@@ -42,21 +61,6 @@ class PayoutCreateView(APIView):
             )
 
         # ── Validate request body ─────────────────────────────────────────────
-        # merchant_id comes from request body (no auth layer in this demo)
-        merchant_id_raw = request.data.get("merchant_id")
-        if not merchant_id_raw:
-            return Response(
-                {"error": "missing_field", "detail": "merchant_id is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            merchant_id = uuid.UUID(str(merchant_id_raw))
-        except ValueError:
-            return Response(
-                {"error": "invalid_field", "detail": "merchant_id must be a valid UUID."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         serializer = CreatePayoutSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(
@@ -66,7 +70,7 @@ class PayoutCreateView(APIView):
 
         # ── Core payout creation (service handles all locking + atomicity) ────
         payout, created = create_payout(
-            merchant_id=merchant_id,
+            merchant_id=merchant.id,
             bank_account_id=serializer.validated_data["bank_account_id"],
             amount_paise=serializer.validated_data["amount_paise"],
             idempotency_key_str=raw_key,
@@ -79,7 +83,7 @@ class PayoutCreateView(APIView):
             try:
                 from apps.payouts.models import IdempotencyKey
                 IdempotencyKey.objects.filter(
-                    merchant_id=merchant_id, key=raw_key
+                    merchant_id=merchant.id, key=raw_key
                 ).update(response_snapshot=payout_data)
             except Exception:
                 pass  # Non-fatal; snapshot is best-effort
@@ -95,10 +99,11 @@ class PayoutCreateView(APIView):
 class PayoutListView(APIView):
     """
     GET /api/v1/merchants/<merchant_id>/payouts
+    Authorization: only the merchant's own user may list its payouts.
     """
 
     def get(self, request, merchant_id):
-        merchant = get_object_or_404(Merchant, pk=merchant_id)
+        merchant = require_owned_merchant(request, merchant_id)
         payouts = (
             Payout.objects.filter(merchant=merchant)
             .select_related("bank_account")
@@ -110,10 +115,13 @@ class PayoutListView(APIView):
 class PayoutDetailView(APIView):
     """
     GET /api/v1/payouts/<payout_id>
+    Authorization: only the owning merchant's user may read.
+    Returns 404 (not 403) on cross-tenant access to avoid id enumeration.
     """
 
     def get(self, request, payout_id):
         payout = get_object_or_404(
             Payout.objects.select_related("bank_account", "merchant"), pk=payout_id
         )
+        require_owned_merchant(request, payout.merchant_id)
         return Response(PayoutSerializer(payout).data)

@@ -10,13 +10,15 @@ DEBUG = config("DEBUG", default=False, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")
 
 DJANGO_APPS = [
-    "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",  # required by auth
     "django.contrib.staticfiles",
 ]
 
 THIRD_PARTY_APPS = [
     "rest_framework",
+    "rest_framework.authtoken",
     "corsheaders",
     "django_extensions",
     "django_celery_beat",
@@ -33,7 +35,10 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -88,6 +93,23 @@ CELERY_BEAT_SCHEDULE = {
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        # Conservative defaults; payout endpoint has its own stricter throttle.
+        "user": "120/min",
+        "anon": "20/min",
+        "payout_create": "10/min",
+    },
     "EXCEPTION_HANDLER": "apps.payouts.exceptions.custom_exception_handler",
 }
 

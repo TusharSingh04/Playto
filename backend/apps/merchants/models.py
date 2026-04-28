@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 
 
@@ -6,6 +7,16 @@ class Merchant(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     email = models.EmailField(unique=True)
+    # Auth linkage: every Merchant maps to exactly one Django User. Views
+    # derive merchant identity from request.user — body-supplied merchant_id
+    # is no longer trusted. Nullable for backfill of pre-auth seed data.
+    auth_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="merchant",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
