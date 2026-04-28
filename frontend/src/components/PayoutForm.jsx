@@ -29,8 +29,9 @@ export default function PayoutForm({ merchant, onSuccess }) {
 
     setLoading(true);
     try {
+      // merchant_id is no longer sent — the server derives it from the
+      // auth token. Sending it from here would just be ignored.
       const payout = await api.createPayout({
-        merchantId: merchant.id,
         amountPaise,
         bankAccountId,
         idempotencyKey: generateUUID(),

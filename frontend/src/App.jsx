@@ -1,69 +1,84 @@
-import { useState, useEffect } from "react";
-import { api } from "./api/client";
+import { useEffect, useState } from "react";
+import { api, getToken } from "./api/client";
+import DemoBanner from "./components/DemoBanner";
 import Dashboard from "./pages/Dashboard";
+import Login from "./pages/Login";
 
 export default function App() {
-  const [merchants, setMerchants] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [merchant, setMerchant] = useState(null);
+  const [booting, setBooting] = useState(true);
 
+  // On mount: if we already have a token, validate it via /auth/me/.
   useEffect(() => {
-    api.getMerchants()
-      .then((data) => {
-        setMerchants(data);
-        if (data.length > 0) setSelected(data[0]);
-      })
-      .catch(() => setError("Could not reach the API. Is the backend running?"))
-      .finally(() => setLoading(false));
+    const token = getToken();
+    if (!token) {
+      setBooting(false);
+      return;
+    }
+    api
+      .whoami()
+      .then((data) =>
+        setMerchant({
+          id: data.merchant_id,
+          name: data.name,
+          email: data.email,
+          bank_accounts: data.bank_accounts,
+        })
+      )
+      .catch(() => api.logout())
+      .finally(() => setBooting(false));
   }, []);
 
-  if (loading) {
+  async function handleLoggedIn(_loginData) {
+    // Login response is minimal; fetch the full merchant profile (incl. bank
+    // accounts) via whoami so the dashboard has everything it needs.
+    const data = await api.whoami();
+    setMerchant({
+      id: data.merchant_id,
+      name: data.name,
+      email: data.email,
+      bank_accounts: data.bank_accounts,
+    });
+  }
+
+  function handleLogout() {
+    api.logout();
+    setMerchant(null);
+  }
+
+  if (booting) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <p className="text-gray-400 animate-pulse">Loading merchants…</p>
+        <p className="text-gray-400 animate-pulse">Loading…</p>
       </div>
     );
   }
 
-  if (error) {
+  if (!merchant) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="rounded-xl bg-red-50 border border-red-200 px-8 py-6 text-center">
-          <p className="text-red-600 font-semibold">{error}</p>
-          <p className="text-sm text-gray-500 mt-2">Start the Django server and refresh.</p>
-        </div>
-      </div>
+      <>
+        <DemoBanner />
+        <Login onLoggedIn={handleLoggedIn} />
+      </>
     );
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Top nav / merchant switcher */}
-      <nav className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-4">
-        <span className="font-bold text-indigo-700 text-lg">Playto Payouts</span>
-        <div className="flex gap-2 ml-4">
-          {merchants.map((m) => (
-            <button
-              key={m.id}
-              onClick={() => setSelected(m)}
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
-                selected?.id === m.id
-                  ? "bg-indigo-600 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-              }`}
-            >
-              {m.name}
-            </button>
-          ))}
+      <DemoBanner />
+      <nav className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="font-bold text-indigo-700 text-lg">Playto Payouts</span>
+          <span className="text-sm text-gray-500">— {merchant.name}</span>
         </div>
+        <button
+          onClick={handleLogout}
+          className="text-sm text-gray-500 hover:text-indigo-600 font-medium"
+        >
+          Sign out
+        </button>
       </nav>
-
-      {selected ? (
-        <Dashboard key={selected.id} merchant={selected} />
-      ) : (
-        <p className="text-center mt-20 text-gray-400">No merchants found. Run seed_data.</p>
-      )}
+      <Dashboard key={merchant.id} merchant={merchant} />
     </div>
   );
 }

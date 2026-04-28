@@ -58,7 +58,9 @@ class LoginView(APIView):
 class WhoAmIView(APIView):
     """
     GET /api/v1/auth/me/
-    Returns the merchant tied to the auth token. Useful for the frontend on boot.
+    Returns the merchant tied to the auth token + their active bank accounts.
+    Used by the frontend on boot and to populate the payout form's account
+    selector without an extra roundtrip.
     """
 
     permission_classes = [IsAuthenticated]
@@ -69,6 +71,20 @@ class WhoAmIView(APIView):
             return Response(
                 {"error": "no_merchant"}, status=status.HTTP_403_FORBIDDEN
             )
+        bank_accounts = [
+            {
+                "id": str(ba.id),
+                "account_number": ba.account_number,
+                "ifsc_code": ba.ifsc_code,
+                "account_holder_name": ba.account_holder_name,
+            }
+            for ba in merchant.bank_accounts.filter(is_active=True)
+        ]
         return Response(
-            {"merchant_id": str(merchant.id), "name": merchant.name, "email": merchant.email}
+            {
+                "merchant_id": str(merchant.id),
+                "name": merchant.name,
+                "email": merchant.email,
+                "bank_accounts": bank_accounts,
+            }
         )
