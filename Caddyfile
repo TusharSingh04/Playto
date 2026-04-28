@@ -1,0 +1,44 @@
+# Caddy reverse-proxy config for production.
+#
+# Replace `payouts.example.com` below with your real domain. Caddy will
+# automatically obtain and renew a Let's Encrypt cert for it as long as
+# the domain's A/AAAA record points at this host (and ports 80/443 are open).
+#
+# Routing:
+#   /api/*    → Django gunicorn (api:8000)
+#   /admin/*  → Django gunicorn (api:8000)  [Django admin]
+#   /static/* → Django gunicorn (api:8000)  [collectstatic output]
+#   /*        → React build served by frontend's nginx (frontend:80)
+
+payouts.example.com {
+    encode zstd gzip
+
+    # Security headers — Django sets these too, but layered is fine.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Remove server fingerprint
+        -Server
+    }
+
+    @api path /api/* /admin/* /static/*
+    handle @api {
+        reverse_proxy api:8000 {
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-For {remote}
+            header_up Host {host}
+        }
+    }
+
+    handle {
+        reverse_proxy frontend:80
+    }
+
+    # Access log to stdout — picked up by your log shipper.
+    log {
+        output stdout
+        format json
+    }
+}

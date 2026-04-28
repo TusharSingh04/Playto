@@ -1,0 +1,116 @@
+# Production compose overlay.
+#
+# Usage:
+#   1. Copy .env.prod.example to .env.prod and fill in real values.
+#   2. docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from docker-compose.yml:
+#   - DJANGO_SETTINGS_MODULE = config.settings.production (DEBUG off, HSTS,
+#     fail-fast on missing SECRET_KEY/ALLOWED_HOSTS).
+#   - Source code is NOT bind-mounted (image is the source of truth).
+#   - Postgres + Redis ports are NOT published — only the proxy reaches them.
+#   - Caddy reverse proxy added: terminates TLS, serves /api → api:8000 and
+#     / → frontend:80, fronted by Cloudflare you control or with Let's Encrypt
+#     ACME (Caddy handles ACME automatically once DNS is pointed at the host).
+#   - Restart policy = unless-stopped on every service.
+
+services:
+  db:
+    ports: []
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+  redis:
+    ports: []
+    restart: unless-stopped
+
+  api:
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             python -m gunicorn config.wsgi:application
+                    --bind 0.0.0.0:8000
+                    --workers 4
+                    --access-logfile -
+                    --error-logfile -"
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+    ports: []  # only Caddy talks to api
+    restart: unless-stopped
+    volumes: []  # no bind mount in prod
+
+  worker:
+    command: celery -A config worker --loglevel=info --concurrency=4
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    restart: unless-stopped
+    volumes: []
+
+  beat:
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    restart: unless-stopped
+    volumes: []
+
+  frontend:
+    ports: []  # only Caddy talks to frontend
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+
+volumes:
+  caddy_data:
+  caddy_config:
