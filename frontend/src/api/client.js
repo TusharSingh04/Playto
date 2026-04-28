@@ -57,4 +57,11 @@ export const api = {
         bank_account_id: bankAccountId,
       }),
     }),
+
+  // ── Free-tier sweep trigger ─────────────────────────────────────────────
+  // On Render free tier there is no Celery worker. The dashboard calls this
+  // periodically while open so pending payouts get processed.
+  // Server-side rate-limited to 10/min/user, so calling it more often is
+  // harmless (excess requests get 429'd).
+  triggerSweep: () => request("/payouts/_sweep/", { method: "POST" }),
 };

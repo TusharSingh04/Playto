@@ -109,6 +109,10 @@ REST_FRAMEWORK = {
         "user": "120/min",
         "anon": "20/min",
         "payout_create": "10/min",
+        # Sweep endpoint runs DB writes; cap per-user so a stuck or buggy
+        # client can't hammer it. 10/min = once every 6s — plenty of headroom
+        # over the dashboard's 10s polling interval.
+        "payout_sweep": "10/min",
     },
     "EXCEPTION_HANDLER": "apps.payouts.exceptions.custom_exception_handler",
 }

@@ -8,4 +8,7 @@ urlpatterns = [
     # Internal — protected by X-Cron-Secret header. Called by an external
     # cron pinger when no Celery worker is provisioned.
     path("_internal/cron/sweep/", cron_views.CronSweepView.as_view(), name="cron-sweep"),
+    # Authenticated alternative — called by the React dashboard's polling
+    # loop. Same processing logic, no shared secret, just login required.
+    path("payouts/_sweep/", cron_views.AuthSweepView.as_view(), name="payout-sweep"),
 ]

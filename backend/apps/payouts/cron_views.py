@@ -15,8 +15,9 @@ import logging
 
 from django.conf import settings
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.payouts.processing import sweep_and_process
@@ -55,6 +56,37 @@ class CronSweepView(APIView):
         summary = sweep_and_process()
         logger.info(
             "Cron sweep done: pending=%d retried=%d exhausted=%d",
+            len(summary["processed_pending"]),
+            len(summary["retried_stuck"]),
+            len(summary["exhausted_failed"]),
+        )
+        return Response(summary)
+
+
+class AuthSweepView(APIView):
+    """
+    POST /api/v1/payouts/_sweep/
+
+    Authenticated alternative to the cron-secret endpoint. Any logged-in
+    merchant user can call it; the sweep itself is global (processes
+    pending payouts for ALL merchants in one pass), but that's fine —
+    each merchant only sees their own payouts via the regular APIs, and
+    the per-payout DB locks make concurrent calls safe.
+
+    Used by the React dashboard's polling loop on Render free tier where
+    no Celery worker is provisioned. Throttled hard so a runaway client
+    can't DoS the database.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payout_sweep"
+
+    def post(self, request):
+        summary = sweep_and_process()
+        logger.info(
+            "Auth sweep by user=%s: pending=%d retried=%d exhausted=%d",
+            request.user.pk,
             len(summary["processed_pending"]),
             len(summary["retried_stuck"]),
             len(summary["exhausted_failed"]),

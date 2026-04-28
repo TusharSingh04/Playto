@@ -4,52 +4,55 @@ A merchant payout system built with Django, Celery, PostgreSQL, and React.
 
 ## Free-tier deployment (Render)
 
-Render's free plan does not include Background Workers or Cron Jobs. To
-deploy on free tier, the project supports a **cron-pinger mode** instead of
-a Celery worker:
+Render's free plan does not include Background Workers or Cron Jobs. The
+project supports two free-tier processing drivers — pick whichever fits.
 
-- `PAYOUT_USE_CELERY=False` — `POST /payouts` writes the row in `pending`
-  and returns. No Celery `.delay()` call.
-- A **free external cron service** (e.g. https://cron-job.org) hits
-  `POST /api/v1/_internal/cron/sweep/` every 60 seconds with header
-  `X-Cron-Secret: <CRON_SECRET>`.
-- That endpoint runs the same sweep logic (`apps/payouts/processing.py`)
-  with the same DB locking and state-machine guarantees that the Celery
-  worker would have applied.
+### Driver A: Dashboard-driven (DEFAULT, zero external setup)
 
-### Steps after Blueprint deploy
+The React dashboard calls `POST /api/v1/payouts/_sweep/` every 10 seconds
+while open. The endpoint is authenticated (no shared secret needed) and
+rate-limited (10/min/user) so multiple tabs are safe.
 
-1. **Set CRON_SECRET** in `playto-api` → Environment. Generate with:
-   ```powershell
-   $b = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
-   ```
+**Setup:** none. Deploy the Blueprint, log in, and processing happens
+automatically while you have the dashboard open. This is the default
+because it works the moment Render finishes deploying.
 
-2. **Sign up at https://cron-job.org** (free, no card required).
+**Constraint:** when no one is viewing the dashboard, no sweep fires.
+Pending payouts sit until someone logs in. On Render free this matches
+the platform behavior — the API itself sleeps after 15 min of no traffic.
 
-3. **Create a job:**
-   - URL: `https://playto-api.onrender.com/api/v1/_internal/cron/sweep/`
-   - Schedule: every 1 minute
-   - Method: `POST`
-   - Header: `X-Cron-Secret: <paste the same value from step 1>`
-   - Save & enable.
+### Driver B: External cron pinger (more robust, optional)
 
-4. **Verify:** Trigger a payout from the UI. Within ~60 seconds it should
-   transition to `completed`/`failed`/`stuck` (and stuck rows clear within
-   another minute).
+If you want sweeps to fire even when the dashboard is closed, a free
+external cron service can hit `POST /api/v1/_internal/cron/sweep/`
+every 60s with an `X-Cron-Secret` header. Two options:
 
-### Trade-offs vs. the Celery setup
+**(B1) cron-job.org** — sign up free, create a job, paste the secret.
+Steps in `docs/cron-job-org.md` (or skip — Driver A works without it).
 
-| Property | Celery (paid) | Cron-pinger (free) |
-|---|---|---|
-| Latency to processing | seconds | up to 60s |
-| Stuck-detection threshold | 30s, real | 60s minimum |
-| External dependency | Redis broker (Render) | cron-job.org liveness |
-| State-machine correctness | identical | identical |
-| Concurrency safety | identical | identical |
-| Spec compliance | full | "async" relaxed to ~60s |
+**(B2) GitHub Actions** — `.github/workflows/cron-sweep.yml` runs every
+5 min and curls the endpoint. Free for public repos. Reuses your
+existing GitHub auth, no new accounts.
 
-To upgrade to Celery later, set `PAYOUT_USE_CELERY=True`, add a Background
-Worker on a paid plan, and disable the cron-job.org job.
+Both options require a `CRON_SECRET` env var on the API service plus the
+matching value in the cron job's headers. Generate the secret with:
+
+```powershell
+$b = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
+```
+
+### Trade-offs at a glance
+
+| Property | Celery (paid) | Driver A (dashboard) | Driver B (cron pinger) |
+|---|---|---|---|
+| Latency to processing | seconds | ~10s while dashboard open | up to 60s |
+| Fires when no one's looking | yes | no | yes |
+| External account | none | none | cron-job.org or GitHub |
+| Shared secret | n/a | n/a | required |
+| Concurrency / state-machine correctness | identical | identical | identical |
+
+To upgrade to a real worker later, set `PAYOUT_USE_CELERY=True`, add a
+Background Worker on a paid Render plan, and disable both drivers.
 
 
 ## Architecture

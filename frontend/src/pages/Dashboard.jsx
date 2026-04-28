@@ -38,6 +38,22 @@ export default function Dashboard({ merchant }) {
   usePolling(fetchPayouts, 3000);
   usePolling(fetchLedger, 5000);
 
+  // Free-tier processing driver: trigger a server-side sweep every 10s
+  // while the dashboard is open. The endpoint is server-rate-limited
+  // (10/min/user), so this is safe even if multiple tabs are open.
+  // A 429 from the throttle is silently ignored (next tick will succeed).
+  usePolling(async () => {
+    try {
+      await api.triggerSweep();
+    } catch (err) {
+      if (err?.status !== 429) {
+        // Surface real errors but don't toast — sweep failures are
+        // self-healing on the next tick.
+        console.warn("sweep failed", err);
+      }
+    }
+  }, 10000);
+
   function showToast(msg, ok = true) {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 4000);
