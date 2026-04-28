@@ -1,6 +1,7 @@
 import uuid
 import logging
 
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
@@ -14,7 +15,6 @@ from apps.merchants.permissions import require_owned_merchant
 from apps.payouts.models import Payout
 from apps.payouts.serializers import CreatePayoutSerializer, PayoutSerializer
 from apps.payouts.service import create_payout
-from apps.payouts.tasks import process_payout
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +113,22 @@ class PayoutCreateView(APIView):
             except Exception:
                 pass  # Non-fatal; snapshot is best-effort
 
-            # Enqueue async processing
-            process_payout.delay(str(payout.id))
-            logger.info("Enqueued process_payout for %s", payout.id)
+            # Dispatch for async processing.
+            #   - If a Celery worker is configured (PAYOUT_USE_CELERY=True),
+            #     enqueue the task and return immediately.
+            #   - Otherwise (free-tier deployments), the payout sits in
+            #     PENDING until the external cron pinger hits the sweep
+            #     endpoint and drives it forward.
+            if settings.PAYOUT_USE_CELERY:
+                # Imported lazily so codepaths without Celery installed/running
+                # don't import it just to skip the call.
+                from apps.payouts.tasks import process_payout
+                process_payout.delay(str(payout.id))
+                logger.info("Enqueued process_payout for %s (celery)", payout.id)
+            else:
+                logger.info(
+                    "Payout %s left PENDING for cron-driven processing", payout.id
+                )
 
         response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response(payout_data, status=response_status)

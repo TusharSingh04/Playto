@@ -2,6 +2,56 @@
 
 A merchant payout system built with Django, Celery, PostgreSQL, and React.
 
+## Free-tier deployment (Render)
+
+Render's free plan does not include Background Workers or Cron Jobs. To
+deploy on free tier, the project supports a **cron-pinger mode** instead of
+a Celery worker:
+
+- `PAYOUT_USE_CELERY=False` — `POST /payouts` writes the row in `pending`
+  and returns. No Celery `.delay()` call.
+- A **free external cron service** (e.g. https://cron-job.org) hits
+  `POST /api/v1/_internal/cron/sweep/` every 60 seconds with header
+  `X-Cron-Secret: <CRON_SECRET>`.
+- That endpoint runs the same sweep logic (`apps/payouts/processing.py`)
+  with the same DB locking and state-machine guarantees that the Celery
+  worker would have applied.
+
+### Steps after Blueprint deploy
+
+1. **Set CRON_SECRET** in `playto-api` → Environment. Generate with:
+   ```powershell
+   $b = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
+   ```
+
+2. **Sign up at https://cron-job.org** (free, no card required).
+
+3. **Create a job:**
+   - URL: `https://playto-api.onrender.com/api/v1/_internal/cron/sweep/`
+   - Schedule: every 1 minute
+   - Method: `POST`
+   - Header: `X-Cron-Secret: <paste the same value from step 1>`
+   - Save & enable.
+
+4. **Verify:** Trigger a payout from the UI. Within ~60 seconds it should
+   transition to `completed`/`failed`/`stuck` (and stuck rows clear within
+   another minute).
+
+### Trade-offs vs. the Celery setup
+
+| Property | Celery (paid) | Cron-pinger (free) |
+|---|---|---|
+| Latency to processing | seconds | up to 60s |
+| Stuck-detection threshold | 30s, real | 60s minimum |
+| External dependency | Redis broker (Render) | cron-job.org liveness |
+| State-machine correctness | identical | identical |
+| Concurrency safety | identical | identical |
+| Spec compliance | full | "async" relaxed to ~60s |
+
+To upgrade to Celery later, set `PAYOUT_USE_CELERY=True`, add a Background
+Worker on a paid plan, and disable the cron-job.org job.
+
+
 ## Architecture
 
 ```

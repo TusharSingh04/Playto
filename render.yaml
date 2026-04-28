@@ -1,21 +1,27 @@
-# Render Blueprint — defines every service so Render provisions in one click.
+# Render Blueprint — FREE TIER variant.
 #
-# Usage:
-#   1. Push this file to main on GitHub.
-#   2. In Render dashboard → "New +" → "Blueprint" → connect this repo.
-#   3. Render reads this file, asks you to fill the secrets marked
-#      `sync: false` below, then provisions everything.
+# Render's free plan does not include Background Workers or Cron Jobs, so
+# this Blueprint provisions only what the free tier supports:
+#   - playto-postgres   managed Postgres 16 (free 30 days, then $6/mo)
+#   - playto-redis      managed Key Value (used for ratelimit cache only —
+#                       no Celery broker since there's no worker to consume)
+#   - playto-api        gunicorn web service
+#   - playto-frontend   static site (Vite build, /api/* rewrite to api)
 #
-# What gets created:
-#   - playto-postgres        managed Postgres 16 (free tier OK for demo)
-#   - playto-redis           managed Key Value (Redis-compatible)
-#   - playto-api             gunicorn web service (Django)
-#   - playto-worker          Celery worker (background worker)
-#   - playto-beat            Celery beat scheduler (background worker)
-#   - playto-frontend        Vite build, served as static site
+# Payout processing is driven by an EXTERNAL free cron pinger (cron-job.org
+# or similar) that hits POST /api/v1/_internal/cron/sweep/ every 60s with
+# the X-Cron-Secret header. See README → "Free-tier processing setup".
 #
-# The free tier of web/worker services sleeps after 15 min idle. That's
-# fine for a demo; upgrade the instance type below if you need always-on.
+# Steps in dashboard:
+#   1. New + → Blueprint → connect Playto repo → Apply.
+#   2. Fill the secrets marked `sync: false` below.
+#   3. After first deploy, open cron-job.org and create a job that POSTs
+#      https://playto-api.onrender.com/api/v1/_internal/cron/sweep/
+#      with header `X-Cron-Secret: <the same value you put in CRON_SECRET>`.
+#
+# When/if you upgrade to a paid plan, set PAYOUT_USE_CELERY=True and add
+# the playto-worker service back (see git history for the worker-enabled
+# variant).
 
 databases:
   - name: playto-postgres
@@ -25,11 +31,11 @@ databases:
     postgresMajorVersion: 16
 
 services:
-  # ── Redis / Key Value (used as Celery broker + ratelimit cache) ─────────
+  # ── Redis / Key Value (ratelimit cache only — Celery is disabled here) ──
   - type: keyvalue
     name: playto-redis
     plan: free
-    ipAllowList: []   # private only — only other Render services can reach it
+    ipAllowList: []   # private only
 
   # ── Django web (gunicorn) ────────────────────────────────────────────────
   - type: web
@@ -45,106 +51,37 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.5"
       - key: SECRET_KEY
-        generateValue: true             # Render generates a strong value once
+        generateValue: true
       - key: ALLOWED_HOSTS
-        sync: false                     # filled at first deploy: <name>.onrender.com
+        sync: false                    # leave blank — auto-filled from RENDER_EXTERNAL_HOSTNAME
       - key: CORS_ALLOWED_ORIGINS
-        sync: false                     # https://<frontend>.onrender.com
+        sync: false                    # https://playto-frontend.onrender.com
       - key: CSRF_TRUSTED_ORIGINS
-        sync: false                     # https://<frontend>.onrender.com
+        sync: false                    # https://playto-frontend.onrender.com
       - key: DATABASE_URL
         fromDatabase:
           name: playto-postgres
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: keyvalue
-          name: playto-redis
           property: connectionString
       - key: CACHE_URL
         fromService:
           type: keyvalue
           name: playto-redis
           property: connectionString
+      # Celery off on free tier — no worker available to consume the queue.
+      - key: PAYOUT_USE_CELERY
+        value: "False"
+      # Shared secret for the external cron pinger. Generate with:
+      # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      - key: CRON_SECRET
+        sync: false
       - key: SENTRY_DSN
-        sync: false                     # paste in dashboard; safe to leave blank
+        sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
       - key: SECURE_SSL_REDIRECT
         value: "True"
       - key: LOG_LEVEL
         value: INFO
-
-  # ── Celery worker ────────────────────────────────────────────────────────
-  - type: worker
-    name: playto-worker
-    runtime: python
-    plan: free
-    buildCommand: "./backend/build.sh"
-    startCommand: "cd backend && celery -A config worker --loglevel=info --concurrency=2"
-    envVars:
-      - key: DJANGO_SETTINGS_MODULE
-        value: config.settings.production
-      - key: PYTHON_VERSION
-        value: "3.12.5"
-      - fromGroup: playto-shared        # see envVarGroups below
-      - key: DATABASE_URL
-        fromDatabase:
-          name: playto-postgres
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-      - key: CACHE_URL
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-
-  # ── Celery beat (periodic scheduler) ─────────────────────────────────────
-  - type: worker
-    name: playto-beat
-    runtime: python
-    plan: free
-    buildCommand: "./backend/build.sh"
-    startCommand: "cd backend && celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
-    envVars:
-      - key: DJANGO_SETTINGS_MODULE
-        value: config.settings.production
-      - key: PYTHON_VERSION
-        value: "3.12.5"
-      - fromGroup: playto-shared
-      - key: DATABASE_URL
-        fromDatabase:
-          name: playto-postgres
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
-      - key: CACHE_URL
-        fromService:
-          type: keyvalue
-          name: playto-redis
-          property: connectionString
 
   # ── Frontend (Vite static site) ──────────────────────────────────────────
   - type: web
@@ -154,29 +91,12 @@ services:
     staticPublishPath: ./frontend/dist
     pullRequestPreviewsEnabled: false
     routes:
-      # API requests proxied to the Django service so the SPA can call /api/* same-origin
       - type: rewrite
         source: /api/*
         destination: https://playto-api.onrender.com/api/:splat
-      # SPA fallback — every other route renders index.html for client-side routing
       - type: rewrite
         source: /*
         destination: /index.html
     envVars:
       - key: VITE_API_BASE
-        value: /api/v1   # same-origin via the rewrite above
-
-# ── Shared env vars used by worker + beat (avoid duplication) ───────────────
-envVarGroups:
-  - name: playto-shared
-    envVars:
-      - key: SECRET_KEY
-        sync: false      # paste the SAME value as playto-api uses
-      - key: ALLOWED_HOSTS
-        sync: false
-      - key: SENTRY_DSN
-        sync: false
-      - key: SENTRY_ENVIRONMENT
-        value: production
-      - key: LOG_LEVEL
-        value: INFO
+        value: /api/v1

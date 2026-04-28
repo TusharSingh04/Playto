@@ -120,6 +120,18 @@ PAYOUT_IDEMPOTENCY_TTL_HOURS = 24
 PAYOUT_MAX_ATTEMPTS = 3
 PAYOUT_STUCK_THRESHOLD_SECONDS = 30
 
+# Dispatch mode:
+#   True  — POST /payouts calls .delay() to enqueue a Celery task.
+#           Requires a running Celery worker + beat (or worker -B).
+#   False — POST /payouts only writes to the DB; an external cron pinger
+#           hits /api/v1/_internal/cron/sweep/ to drive processing.
+#           Used on Render free tier (no background workers available).
+PAYOUT_USE_CELERY = config("PAYOUT_USE_CELERY", default=True, cast=bool)
+
+# Required when PAYOUT_USE_CELERY=False. Shared secret between Django and
+# the external cron pinger (e.g. cron-job.org).
+CRON_SECRET = config("CRON_SECRET", default="")
+
 # django-ratelimit: cache backend for distributed rate limiting.
 # Falls back to LocMem in dev (per-process, fine for single-worker runs).
 # In prod, point CACHE_URL at redis so all gunicorn workers share the counter.
