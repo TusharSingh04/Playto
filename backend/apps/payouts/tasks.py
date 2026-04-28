@@ -119,43 +119,57 @@ def poll_and_dispatch() -> dict:
         dispatched.append(str(payout_id))
 
     # ── Re-enqueue or fail stuck processing payouts ───────────────────────────
+    # NOTE: select_for_update(skip_locked=True) MUST run inside transaction.atomic().
+    # Outside one, Django raises TransactionManagementError. We also do the dispatch
+    # work inside the same txn so the row lock prevents duplicate sweepers from
+    # acting on the same stuck payout.
     from datetime import timedelta
     stuck_cutoff = now - timedelta(seconds=stuck_threshold)
 
-    stuck_payouts = list(
-        Payout.objects.filter(
-            state=PayoutState.PROCESSING,
-            processing_started_at__lt=stuck_cutoff,
-        ).select_for_update(skip_locked=True)[:20]
-    )
+    with transaction.atomic():
+        stuck_payouts = list(
+            Payout.objects.filter(
+                state=PayoutState.PROCESSING,
+                processing_started_at__lt=stuck_cutoff,
+            ).select_for_update(skip_locked=True)[:20]
+        )
 
-    for payout in stuck_payouts:
-        if payout.attempts >= max_attempts:
-            # Reset to pending so process_payout can transition it, then fail it
-            # Actually: fail directly here since we have the payout object
-            try:
-                # Force state back to processing (it already is) then fail
-                settle_payout_failure(payout, reason=f"Exceeded max attempts ({max_attempts}).")
-                exhausted_failed.append(str(payout.id))
-                logger.warning("Payout %s exhausted retries, marked failed", payout.id)
-            except PayoutTransitionError as exc:
-                logger.error("Failed to exhaust payout %s: %s", payout.id, exc)
-        else:
-            # Reset to pending for re-dispatch with exponential backoff
-            delay = RETRY_BASE_DELAY_SECONDS * (2 ** payout.attempts)
-            with transaction.atomic():
+        for payout in stuck_payouts:
+            if payout.attempts >= max_attempts:
+                # Exhausted: PROCESSING → FAILED is a legal forward transition.
+                # settle_payout_failure releases the hold + marks state inside its
+                # own atomic block. Wrapped in try because a concurrent worker
+                # could in theory have just settled this same payout.
+                try:
+                    settle_payout_failure(
+                        payout, reason=f"Exceeded max attempts ({max_attempts})."
+                    )
+                    exhausted_failed.append(str(payout.id))
+                    logger.warning("Payout %s exhausted retries, marked failed", payout.id)
+                except PayoutTransitionError as exc:
+                    logger.error("Failed to exhaust payout %s: %s", payout.id, exc)
+            else:
+                # Re-dispatch WITHOUT moving state backwards (PROCESSING→PENDING
+                # would violate the state machine's "no backward transitions" rule).
+                # Instead, we refresh processing_started_at so the sweeper does
+                # not immediately re-pick this row, and re-queue process_payout
+                # with exponential backoff. process_payout is idempotent for
+                # state==PROCESSING — it skips the pending→processing transition
+                # and re-runs the bank simulation.
+                delay = RETRY_BASE_DELAY_SECONDS * (2 ** payout.attempts)
                 Payout.objects.filter(pk=payout.pk, state=PayoutState.PROCESSING).update(
-                    state=PayoutState.PENDING,
-                    processing_started_at=None,
+                    processing_started_at=now,
+                    attempts=payout.attempts + 1,
                 )
-            process_payout.apply_async(args=[str(payout.id)], countdown=delay)
-            stuck_retried.append(str(payout.id))
-            logger.info(
-                "Payout %s re-queued after stuck detection (delay=%ds, attempt=%d)",
-                payout.id,
-                delay,
-                payout.attempts,
-            )
+                process_payout.apply_async(args=[str(payout.id)], countdown=delay)
+                stuck_retried.append(str(payout.id))
+                logger.info(
+                    "Payout %s re-queued after stuck detection (delay=%ds, attempt=%d→%d)",
+                    payout.id,
+                    delay,
+                    payout.attempts,
+                    payout.attempts + 1,
+                )
 
     return {
         "dispatched": dispatched,
