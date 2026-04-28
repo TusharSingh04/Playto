@@ -16,6 +16,7 @@ Run with: DJANGO_SETTINGS_MODULE=config.settings.production
 
 import os
 
+import dj_database_url
 from decouple import Csv, config
 
 from .base import *  # noqa: F401, F403
@@ -31,11 +32,18 @@ if not SECRET_KEY or SECRET_KEY.startswith("dev-"):
         "(not a dev placeholder)."
     )
 
-ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv())
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="", cast=Csv())
+# Render injects RENDER_EXTERNAL_HOSTNAME automatically — accept it without
+# making the operator paste the same value twice.
+_render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+if _render_host and _render_host not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS = [*ALLOWED_HOSTS, _render_host]
+
 if not ALLOWED_HOSTS or ALLOWED_HOSTS == ["*"]:
     raise RuntimeError(
         "ALLOWED_HOSTS must be an explicit comma-separated list in production "
-        "(never '*')."
+        "(never '*'). On Render this is auto-detected from "
+        "RENDER_EXTERNAL_HOSTNAME if you don't set it manually."
     )
 
 # ── HTTPS / cookies / HSTS ────────────────────────────────────────────────────
@@ -121,7 +129,25 @@ LOGGING = {
 # ── Static files (collected to disk; served by reverse proxy / CDN) ───────────
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")  # noqa: F405
 
-# ── DB connection pooling hint ────────────────────────────────────────────────
-# Re-use connections within a request lifecycle.
-DATABASES["default"]["CONN_MAX_AGE"] = config("DB_CONN_MAX_AGE", default=60, cast=int)  # noqa: F405
-DATABASES["default"]["CONN_HEALTH_CHECKS"] = True  # noqa: F405
+# ── Database: prefer DATABASE_URL when present (Render, Heroku, etc.) ─────────
+# Falls back to the per-field config from base.py for VPS/docker-compose setups.
+_database_url = os.environ.get("DATABASE_URL")
+if _database_url:
+    DATABASES["default"] = dj_database_url.parse(  # noqa: F405
+        _database_url,
+        conn_max_age=config("DB_CONN_MAX_AGE", default=60, cast=int),
+        conn_health_checks=True,
+        ssl_require=config("DB_SSL_REQUIRE", default=True, cast=bool),
+    )
+else:
+    DATABASES["default"]["CONN_MAX_AGE"] = config("DB_CONN_MAX_AGE", default=60, cast=int)  # noqa: F405
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True  # noqa: F405
+
+# ── Static files served by WhiteNoise (no nginx in front on Render web) ───────
+# WhiteNoise compresses + adds far-future cache headers to /static/* assets.
+MIDDLEWARE = [  # noqa: F405
+    MIDDLEWARE[0],  # CorsMiddleware  # noqa: F405
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    *MIDDLEWARE[1:],  # noqa: F405
+]
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
