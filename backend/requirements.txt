@@ -9,6 +9,10 @@ django-extensions==3.2.3
 Werkzeug==3.0.3
 django-celery-beat==2.6.0
 gunicorn==22.0.0
+# production hardening
+sentry-sdk==2.13.0
+django-ratelimit==4.1.0
+whitenoise==6.7.0
 # testing
 pytest==8.2.2
 pytest-django==4.8.0
