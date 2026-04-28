@@ -2,8 +2,10 @@ import uuid
 import logging
 
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
+from django_ratelimit.decorators import ratelimit
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, Throttled
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -25,6 +27,17 @@ def _resolve_merchant(request):
     return merchant
 
 
+def _user_or_ip(group, request):
+    """Rate-limit key: per-user when authed, per-IP otherwise.
+
+    Keying on user.id is critical — IP-only would let one merchant's heavy
+    traffic starve another behind the same NAT.
+    """
+    if request.user.is_authenticated:
+        return f"user:{request.user.pk}"
+    return request.META.get("REMOTE_ADDR", "anon")
+
+
 class PayoutCreateView(APIView):
     """
     POST /api/v1/payouts
@@ -42,7 +55,19 @@ class PayoutCreateView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "payout_create"
 
+    # Defense-in-depth: DRF throttle is per-process (in-memory) by default.
+    # django-ratelimit uses the shared cache (Redis in prod) so the limit is
+    # enforced across every gunicorn worker and every machine in the cluster.
+    # 5/min per user matches the prod throttle in production.py.
+    @method_decorator(
+        ratelimit(key=_user_or_ip, rate="5/m", method="POST", block=False)
+    )
     def post(self, request):
+        if getattr(request, "limited", False):
+            # block=False above means we read the flag and respond ourselves
+            # so we can return a JSON 429 (not the html ratelimited page).
+            raise Throttled(detail="Too many payout requests. Slow down.")
+
         merchant = _resolve_merchant(request)
 
         # ── Validate idempotency key ──────────────────────────────────────────

@@ -119,3 +119,17 @@ CORS_ALLOW_ALL_ORIGINS = True
 PAYOUT_IDEMPOTENCY_TTL_HOURS = 24
 PAYOUT_MAX_ATTEMPTS = 3
 PAYOUT_STUCK_THRESHOLD_SECONDS = 30
+
+# django-ratelimit: cache backend for distributed rate limiting.
+# Falls back to LocMem in dev (per-process, fine for single-worker runs).
+# In prod, point CACHE_URL at redis so all gunicorn workers share the counter.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache"
+        if config("CACHE_URL", default="").startswith("redis://")
+        else "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": config("CACHE_URL", default="ratelimit-locmem"),
+    }
+}
+RATELIMIT_USE_CACHE = "default"
+RATELIMIT_FAIL_OPEN = False  # if cache is down, BLOCK rather than allow
